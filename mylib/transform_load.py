@@ -3,48 +3,41 @@ import pandas as pd
 from databricks import sql
 from dotenv import load_dotenv
 import logging
-import urllib3
 
-# Disable SSL warnings and enable verbose logging
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+# Configure logging
 logging.basicConfig(level=logging.DEBUG)
 
-# Load environment variables from .env file
+# Load environment variables
 load_dotenv(override=True)
 
 
-# Load the CSV file and insert it into Databricks
-def load(dataset="data/Spotify_Most_Streamed_Songs.csv"):
-    """Transforms and Loads data into the Databricks database"""
+def load(dataset="data/movies.csv"):
+    """Transforms and Loads data into the Databricks database."""
     # Check if the dataset exists before proceeding
     if not os.path.exists(dataset):
         raise FileNotFoundError(f"Dataset file {dataset} not found.")
 
-    # Load the CSV file
-    df = pd.read_csv(dataset, delimiter=",", skiprows=1)
+    # Load and transform the dataset
+    df = pd.read_csv(dataset, delimiter=",")
     df.columns = df.columns.str.strip()
 
-    logging.debug(f"Columns in the dataset: {df.columns}")
+    # Unpivot the genre column
+    df = (
+        df.assign(genre=df["genre"].str.split("|"))
+        .explode("genre")
+        .reset_index(drop=True)
+    )
+    logging.debug(f"Transformed dataset:\n{df.head()}")
 
     # Retrieve environment variables
-    server_h = os.getenv("server_host")
-    access_token = os.getenv("databricks_api_key")
-    http_path = os.getenv("sql_http")
+    server_h = os.getenv("SERVER_HOST")
+    access_token = os.getenv("DATABRICKS_API_KEY")
+    http_path = os.getenv("SQL_HTTP")
 
-    # Error handling for missing environment variables
     if not server_h or not access_token or not http_path:
         raise ValueError("Environment variables not set correctly.")
 
-    # Ensure the http_path is stripped properly
-    http_path = http_path.strip()
-
-    full_url = (
-        f"https://{server_h}"
-        f"{http_path if http_path.startswith('/') else '/' + http_path}"
-    )
-    logging.debug(f"Connecting to: {full_url}")
-
-    # Databricks connection logic
+    # Connect to Databricks and load the data
     try:
         with sql.connect(
             server_hostname=server_h,
@@ -52,51 +45,35 @@ def load(dataset="data/Spotify_Most_Streamed_Songs.csv"):
             access_token=access_token,
             timeout=30,
         ) as connection:
-            c = connection.cursor()
+            cursor = connection.cursor()
 
-            # Check if the table exists
-            c.execute("SHOW TABLES FROM default LIKE 'csm_87_Spotify*'")
-            result = c.fetchall()
-
-            # Create table if it doesn't exist
-            if not result:
-                logging.debug(
-                    "Table does not exist. Creating csm_87_SpotifyDB table..."
+            # Create the table if it doesn't exist
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS csm_87_movies (
+                    id BIGINT,
+                    title STRING,
+                    genre STRING
                 )
-                c.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS csm_87_SpotifyDB (
-                        id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,  
-                        track_name STRING,
-                        artist_name STRING,
-                        artist_count INT,
-                        released_year INT,
-                        released_month INT,
-                        released_day INT,
-                        in_spotify_playlists INT,
-                        in_spotify_charts INT,
-                        streams BIGINT,
-                        in_apple_playlists INT,
-                        key STRING,
-                        mode STRING,
-                        danceability_percent INT,
-                        valence_percent INT,
-                        energy_percent INT,
-                        acousticness_percent INT,
-                        instrumentalness_percent INT,
-                        liveness_percent INT,
-                        speechiness_percent INT,
-                        cover_url STRING
-                    )
+                USING DELTA;
+                """
+            )
+            logging.info("Persistent table created or exists already.")
+
+            # Insert data row-by-row with proper escaping
+            logging.info("Inserting data into the table row-by-row.")
+            for _, row in df.iterrows():
+                id_val = int(row["id"])
+                title_val = row["title"].replace("'", "''")  # Escape single quotes
+                genre_val = row["genre"].replace("'", "''")  # Escape single quotes
+
+                cursor.execute(
+                    f"""
+                    INSERT INTO csm_87_movies (id, title, genre)
+                    VALUES ({id_val}, '{title_val}', '{genre_val}');
                     """
                 )
-                logging.debug("Table created successfully.")
-
-            logging.debug(f"Data from CSV: \n{df.head()}")
-
-            c.close()
-
-        return "success"
+            logging.info("Data successfully inserted into the csm_87_movies table.")
 
     except Exception as e:
         logging.error(f"Error while connecting to Databricks: {e}")
